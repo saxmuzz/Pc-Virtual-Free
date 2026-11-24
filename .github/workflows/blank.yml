@@ -1,0 +1,79 @@
+name: Pc Virtual Online
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutos:
+        description: "Quantos minutos o PC virtual ficará ligado (máx. 350)"
+        required: true
+        default: "120"
+
+jobs:
+  pc-virtual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Instalar ambiente gráfico (XFCE + VNC + noVNC)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xfce4 xfce4-terminal dbus-x11 \
+            tigervnc-standalone-server tigervnc-common \
+            novnc websockify
+
+      - name: Configurar o VNC
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          mkdir -p ~/.vnc
+          echo "$VNC_PASSWORD" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          exec startxfce4
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+      - name: Iniciar desktop e noVNC
+        run: |
+          vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
+          nohup websockify --web=/usr/share/novnc 6080 localhost:5901 > websockify.log 2>&1 &
+          sleep 3
+
+      - name: Criar link público (Cloudflare Tunnel)
+        run: |
+          curl -sSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -n 1 || true)
+            if [ -n "$URL" ]; then break; fi
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Não foi possível criar o túnel."
+            cat tunnel.log
+            exit 1
+          fi
+
+          LINK="$URL/vnc.html?autoconnect=true&resize=scale"
+          echo "PC VIRTUAL ONLINE: $LINK"
+          {
+            echo "## 🖥️ Pc Virtual Online"
+            echo ""
+            echo "Acesse: $LINK"
+            echo ""
+            echo "Senha: a que você definiu no secret VNC_PASSWORD"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Manter o PC ligado
+        run: |
+          MIN=${{ github.event.inputs.minutos }}
+          echo "PC ligado por $MIN minutos..."
+          sleep $((MIN * 60))
